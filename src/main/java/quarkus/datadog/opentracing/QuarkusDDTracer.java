@@ -1,17 +1,17 @@
 package quarkus.datadog.opentracing;
 
-import quarkus.datadog.trace.bootstrap.instrumentation.api.AgentPropagation.ContextVisitor;
-import quarkus.datadog.trace.bootstrap.instrumentation.api.AgentPropagation.KeyClassifier;
-import quarkus.datadog.trace.bootstrap.instrumentation.api.AgentPropagation.Setter;
-import quarkus.datadog.trace.bootstrap.instrumentation.api.AgentSpan;
-import quarkus.datadog.trace.bootstrap.instrumentation.api.AgentSpan.Context;
-import quarkus.datadog.trace.bootstrap.instrumentation.api.AgentTracer;
-import quarkus.datadog.trace.bootstrap.instrumentation.api.AgentTracer.TracerAPI;
-import quarkus.datadog.trace.core.CoreTracer;
-import quarkus.datadog.trace.core.DDSpanContext;
+import datadog.trace.api.DDTags;
 import datadog.trace.api.GlobalTracer;
 import datadog.trace.api.interceptor.TraceInterceptor;
+import quarkus.datadog.trace.api.Config;
+import quarkus.datadog.trace.bootstrap.instrumentation.api.AgentPropagation;
+import quarkus.datadog.trace.bootstrap.instrumentation.api.AgentSpan;
+import quarkus.datadog.trace.bootstrap.instrumentation.api.AgentTracer;
 import datadog.trace.context.ScopeListener;
+import quarkus.datadog.trace.core.CoreTracer;
+import quarkus.datadog.trace.core.DDSpanContext;
+import quarkus.datadog.trace.core.propagation.ExtractedContext;
+import io.opentracing.References;
 import io.opentracing.Scope;
 import io.opentracing.ScopeManager;
 import io.opentracing.Span;
@@ -21,237 +21,271 @@ import io.opentracing.propagation.Format;
 import io.opentracing.propagation.TextMapExtract;
 import io.opentracing.propagation.TextMapInject;
 import io.opentracing.tag.Tag;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.Map;
+import java.util.Map.Entry;
+import lombok.extern.slf4j.Slf4j;
 
+/**
+ * DDTracer implements the <code>io.opentracing.Tracer</code> interface to make it easy to send
+ * traces and spans to Datadog using the OpenTracing API.
+ */
+@Slf4j
 public class QuarkusDDTracer implements Tracer, datadog.trace.api.Tracer {
-    private static final Logger log = LoggerFactory.getLogger(QuarkusDDTracer.class);
-    private final TypeConverter converter;
-    private final TracerAPI tracer;
-    private ScopeManager scopeManager;
+  private final TypeConverter converter;
+  private final AgentTracer.TracerAPI tracer;
 
-    private QuarkusDDTracer() {
-        if (GlobalTracer.get().getClass().getName().equals("datadog.lib.datadog.trace.agent.core.CoreTracer")) {
-            log.error("Datadog Tracer already installed by `dd-java-agent`. NOTE: Manually creating the tracer while using `dd-java-agent` is not supported");
-            throw new IllegalStateException("Datadog Tracer already installed");
-        } else {
-            this.converter = new TypeConverter(new DefaultLogHandler());
+  // FIXME [API] There's an unfortunate cycle between OTScopeManager and CoreTracer where they
+  // each depend on each other so scopeManager can't be final
+  // Perhaps the api can change so that CoreTracer doesn't need to implement scope methods directly
+  private ScopeManager scopeManager;
 
-            this.tracer = CoreTracer.builder().build();
-            if (scopeManager == null) {
-                this.scopeManager = new OTScopeManager(this.tracer, this.converter);
-            }
+  //prameters must be defined as env vars
+  private QuarkusDDTracer() {
 
-        }
+    // Check if the tracer is already installed by the agent
+    // Unable to use "instanceof" because of class renaming
+    if (GlobalTracer.get().getClass().getName().equals("quarkus.datadog.trace.agent.core.CoreTracer")) {
+      log.error(
+          "Datadog Tracer already installed by `dd-java-agent`. NOTE: Manually creating the tracer while using `dd-java-agent` is not supported");
+      throw new IllegalStateException("Datadog Tracer already installed");
+    } else {
+      converter = new TypeConverter(new DefaultLogHandler());
+
+      tracer = CoreTracer.builder().build();
+      if (scopeManager == null) {
+        this.scopeManager = new OTScopeManager(this.tracer, this.converter);
+      }
+    }
+  }
+
+  private static Map<String, String> customRuntimeTags(
+      final String runtimeId, final Map<String, String> applicationRootSpanTags) {
+    final Map<String, String> runtimeTags = new HashMap<>(applicationRootSpanTags);
+    runtimeTags.put(DDTags.RUNTIME_ID_TAG, runtimeId);
+    return Collections.unmodifiableMap(runtimeTags);
+  }
+
+  @Override
+  public String getTraceId() {
+    return tracer.getTraceId();
+  }
+
+  @Override
+  public String getSpanId() {
+    return tracer.getSpanId();
+  }
+
+  @Override
+  public boolean addTraceInterceptor(final TraceInterceptor traceInterceptor) {
+    return tracer.addTraceInterceptor(traceInterceptor);
+  }
+
+  @Override
+  public void addScopeListener(final ScopeListener listener) {
+    tracer.addScopeListener(listener);
+  }
+
+  @Override
+  public ScopeManager scopeManager() {
+    return scopeManager;
+  }
+
+  @Override
+  public Span activeSpan() {
+    return scopeManager.activeSpan();
+  }
+
+  @Override
+  public Scope activateSpan(final Span span) {
+    return scopeManager.activate(span);
+  }
+
+  @Override
+  public DDSpanBuilder buildSpan(final String operationName) {
+    return new DDSpanBuilder(operationName);
+  }
+
+  @Override
+  public <C> void inject(final SpanContext spanContext, final Format<C> format, final C carrier) {
+    if (carrier instanceof TextMapInject) {
+      final AgentSpan.Context context = converter.toContext(spanContext);
+
+      tracer.inject(context, (TextMapInject) carrier, TextMapInjectSetter.INSTANCE);
+    } else {
+      log.debug("Unsupported format for propagation - {}", format.getClass().getName());
+    }
+  }
+
+  @Override
+  public <C> SpanContext extract(final Format<C> format, final C carrier) {
+    if (carrier instanceof TextMapExtract) {
+      final AgentSpan.Context tagContext =
+          tracer.extract(
+              (TextMapExtract) carrier, new TextMapExtractGetter((TextMapExtract) carrier));
+
+      return converter.toSpanContext(tagContext);
+    } else {
+      log.debug("Unsupported format for propagation - {}", format.getClass().getName());
+      return null;
+    }
+  }
+
+  @Override
+  public void close() {
+    tracer.close();
+  }
+
+  public static QuarkusDDTracer build() {
+    return new QuarkusDDTracer();
+  }
+
+  private static class TextMapInjectSetter implements AgentPropagation.Setter<TextMapInject> {
+    static final TextMapInjectSetter INSTANCE = new TextMapInjectSetter();
+
+    @Override
+    public void set(final TextMapInject carrier, final String key, final String value) {
+      carrier.put(key, value);
+    }
+  }
+
+  private static class TextMapExtractGetter
+      implements AgentPropagation.ContextVisitor<TextMapExtract> {
+    private final TextMapExtract carrier;
+
+    private TextMapExtractGetter(final TextMapExtract carrier) {
+      this.carrier = carrier;
     }
 
-    private static Map<String, String> customRuntimeTags(String runtimeId, Map<String, String> applicationRootSpanTags) {
-        Map<String, String> runtimeTags = new HashMap(applicationRootSpanTags);
-        runtimeTags.put("runtime-id", runtimeId);
-        return Collections.unmodifiableMap(runtimeTags);
+    @Override
+    public void forEachKey(TextMapExtract ignored, AgentPropagation.KeyClassifier classifier) {
+      for (Entry<String, String> entry : carrier) {
+        if (!classifier.accept(entry.getKey(), entry.getValue())) {
+          return;
+        }
+      }
+    }
+  }
+
+  public class DDSpanBuilder implements SpanBuilder {
+    private final AgentTracer.SpanBuilder delegate;
+
+    public DDSpanBuilder(final String operationName) {
+      delegate = tracer.buildSpan(operationName);
     }
 
-    public String getTraceId() {
-        return this.tracer.getTraceId();
+    @Override
+    public DDSpanBuilder asChildOf(final SpanContext parent) {
+      delegate.asChildOf(converter.toContext(parent));
+      return this;
     }
 
-    public String getSpanId() {
-        return this.tracer.getSpanId();
+    @Override
+    public DDSpanBuilder asChildOf(final Span parent) {
+      if (parent != null) {
+        delegate.asChildOf(converter.toAgentSpan(parent).context());
+      }
+      return this;
     }
 
-    public boolean addTraceInterceptor(TraceInterceptor traceInterceptor) {
-        return this.tracer.addTraceInterceptor(traceInterceptor);
+    @Override
+    public DDSpanBuilder addReference(
+        final String referenceType, final SpanContext referencedContext) {
+      if (referencedContext == null) {
+        return this;
+      }
+
+      final AgentSpan.Context context = converter.toContext(referencedContext);
+      if (!(context instanceof ExtractedContext) && !(context instanceof DDSpanContext)) {
+        log.debug(
+            "Expected to have a DDSpanContext or ExtractedContext but got "
+                + context.getClass().getName());
+        return this;
+      }
+
+      if (References.CHILD_OF.equals(referenceType)
+          || References.FOLLOWS_FROM.equals(referenceType)) {
+        delegate.asChildOf(context);
+      } else {
+        log.debug("Only support reference type of CHILD_OF and FOLLOWS_FROM");
+      }
+
+      return this;
     }
 
-    public void addScopeListener(ScopeListener listener) {
-        this.tracer.addScopeListener(listener);
+    @Override
+    public DDSpanBuilder ignoreActiveSpan() {
+      delegate.ignoreActiveSpan();
+      return this;
     }
 
-    public ScopeManager scopeManager() {
-        return this.scopeManager;
+    @Override
+    public DDSpanBuilder withTag(final String key, final String value) {
+      delegate.withTag(key, value);
+      return this;
     }
 
-    public Span activeSpan() {
-        return this.scopeManager.activeSpan();
+    @Override
+    public DDSpanBuilder withTag(final String key, final boolean value) {
+      delegate.withTag(key, value);
+      return this;
     }
 
-    public Scope activateSpan(Span span) {
-        return this.scopeManager.activate(span);
+    @Override
+    public DDSpanBuilder withTag(final String key, final Number value) {
+      delegate.withTag(key, value);
+      return this;
     }
 
-    public DDSpanBuilder buildSpan(String operationName) {
-        return new DDSpanBuilder(operationName);
+    @Override
+    public <T> DDSpanBuilder withTag(final Tag<T> tag, final T value) {
+      delegate.withTag(tag.getKey(), value);
+      return this;
     }
 
-    public <C> void inject(SpanContext spanContext, Format<C> format, C carrier) {
-        if (carrier instanceof TextMapInject) {
-            Context context = this.converter.toContext(spanContext);
-            this.tracer.inject(context, (TextMapInject)carrier, TextMapInjectSetter.INSTANCE);
-        } else {
-            log.debug("Unsupported format for propagation - {}", format.getClass().getName());
-        }
-
+    @Override
+    public DDSpanBuilder withStartTimestamp(final long microseconds) {
+      delegate.withStartTimestamp(microseconds);
+      return this;
     }
 
-    public <C> SpanContext extract(Format<C> format, C carrier) {
-        if (carrier instanceof TextMapExtract) {
-            Context tagContext = this.tracer.extract((TextMapExtract)carrier, new TextMapExtractGetter((TextMapExtract)carrier));
-            return this.converter.toSpanContext(tagContext);
-        } else {
-            log.debug("Unsupported format for propagation - {}", format.getClass().getName());
-            return null;
-        }
+    @Override
+    public Span startManual() {
+      return start();
     }
 
-    public void close() {
-        this.tracer.close();
+    @Override
+    public Span start() {
+      final AgentSpan agentSpan = delegate.start();
+      return converter.toSpan(agentSpan);
     }
 
-    public static QuarkusDDTracer build() {
-        return new QuarkusDDTracer();
+    /** @deprecated use {@link #start()} instead. */
+    @Deprecated
+    @Override
+    public Scope startActive(final boolean finishSpanOnClose) {
+      return scopeManager.activate(start(), finishSpanOnClose);
     }
 
-    public class DDSpanBuilder implements SpanBuilder {
-        private final AgentTracer.SpanBuilder delegate;
-
-        public DDSpanBuilder(String operationName) {
-            this.delegate = QuarkusDDTracer.this.tracer.buildSpan(operationName);
-        }
-
-        public DDSpanBuilder asChildOf(SpanContext parent) {
-            this.delegate.asChildOf(QuarkusDDTracer.this.converter.toContext(parent));
-            return this;
-        }
-
-        public DDSpanBuilder asChildOf(Span parent) {
-            if (parent != null) {
-                this.delegate.asChildOf(QuarkusDDTracer.this.converter.toAgentSpan(parent).context());
-            }
-
-            return this;
-        }
-
-        public DDSpanBuilder addReference(String referenceType, SpanContext referencedContext) {
-            if (referencedContext == null) {
-                return this;
-            } else {
-                Context context = QuarkusDDTracer.this.converter.toContext(referencedContext);
-                if (!(context instanceof quarkus.datadog.trace.core.propagation.ExtractedContext) && !(context instanceof DDSpanContext)) {
-                    QuarkusDDTracer.log.debug("Expected to have a DDSpanContext or ExtractedContext but got " + context.getClass().getName());
-                    return this;
-                } else {
-                    if (!"child_of".equals(referenceType) && !"follows_from".equals(referenceType)) {
-                        QuarkusDDTracer.log.debug("Only support reference type of CHILD_OF and FOLLOWS_FROM");
-                    } else {
-                        this.delegate.asChildOf(context);
-                    }
-
-                    return this;
-                }
-            }
-        }
-
-        public DDSpanBuilder ignoreActiveSpan() {
-            this.delegate.ignoreActiveSpan();
-            return this;
-        }
-
-        public DDSpanBuilder withTag(String key, String value) {
-            this.delegate.withTag(key, value);
-            return this;
-        }
-
-        public DDSpanBuilder withTag(String key, boolean value) {
-            this.delegate.withTag(key, value);
-            return this;
-        }
-
-        public DDSpanBuilder withTag(String key, Number value) {
-            this.delegate.withTag(key, value);
-            return this;
-        }
-
-        public <T> DDSpanBuilder withTag(Tag<T> tag, T value) {
-            this.delegate.withTag(tag.getKey(), value);
-            return this;
-        }
-
-        public DDSpanBuilder withStartTimestamp(long microseconds) {
-            this.delegate.withStartTimestamp(microseconds);
-            return this;
-        }
-
-        public Span startManual() {
-            return this.start();
-        }
-
-        public Span start() {
-            AgentSpan agentSpan = this.delegate.start();
-            return QuarkusDDTracer.this.converter.toSpan(agentSpan);
-        }
-
-        /** @deprecated */
-        @Deprecated
-        public Scope startActive(boolean finishSpanOnClose) {
-            return QuarkusDDTracer.this.scopeManager.activate(this.start(), finishSpanOnClose);
-        }
-
-        public DDSpanBuilder withServiceName(String serviceName) {
-            this.delegate.withServiceName(serviceName);
-            return this;
-        }
-
-        public DDSpanBuilder withResourceName(String resourceName) {
-            this.delegate.withResourceName(resourceName);
-            return this;
-        }
-
-        public DDSpanBuilder withErrorFlag() {
-            this.delegate.withErrorFlag();
-            return this;
-        }
-
-        public DDSpanBuilder withSpanType(String spanType) {
-            this.delegate.withSpanType(spanType);
-            return this;
-        }
+    public DDSpanBuilder withServiceName(final String serviceName) {
+      delegate.withServiceName(serviceName);
+      return this;
     }
 
-    private static class TextMapExtractGetter implements ContextVisitor<TextMapExtract> {
-        private final TextMapExtract carrier;
-
-        private TextMapExtractGetter(TextMapExtract carrier) {
-            this.carrier = carrier;
-        }
-
-        public void forEachKey(TextMapExtract ignored, KeyClassifier classifier) {
-            Iterator var3 = this.carrier.iterator();
-
-            Map.Entry entry;
-            do {
-                if (!var3.hasNext()) {
-                    return;
-                }
-
-                entry = (Map.Entry)var3.next();
-            } while(classifier.accept((String)entry.getKey(), (String)entry.getValue()));
-
-        }
+    public DDSpanBuilder withResourceName(final String resourceName) {
+      delegate.withResourceName(resourceName);
+      return this;
     }
 
-    private static class TextMapInjectSetter implements Setter<TextMapInject> {
-        static final TextMapInjectSetter INSTANCE = new TextMapInjectSetter();
-
-        private TextMapInjectSetter() {
-        }
-
-        public void set(TextMapInject carrier, String key, String value) {
-            carrier.put(key, value);
-        }
+    public DDSpanBuilder withErrorFlag() {
+      delegate.withErrorFlag();
+      return this;
     }
+
+    public DDSpanBuilder withSpanType(final String spanType) {
+      delegate.withSpanType(spanType);
+      return this;
+    }
+  }
 }

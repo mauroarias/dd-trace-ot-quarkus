@@ -61,51 +61,53 @@ public final class ConfigProvider {
   }
 
   public final Boolean getBoolean(String key) {
-    return get(key, null, Boolean.class);
+    final String value = get(key);
+    return value == null ? null : new Boolean(value);
   }
 
   public final boolean getBoolean(String key, boolean defaultValue, String... aliases) {
-    return get(key, defaultValue, Boolean.class, aliases);
+    final String value = get(key);
+    return value == null ? defaultValue : new Boolean(value);
   }
 
   public final Integer getInteger(String key) {
-    return get(key, null, Integer.class);
+    final String value = this.get(key);
+    return value == null ? null : new Integer(value);
   }
 
   public final int getInteger(String key, int defaultValue, String... aliases) {
-    return get(key, defaultValue, Integer.class, aliases);
+    final String value = this.get(key);
+    return value == null ? defaultValue : new Integer(value);
   }
 
   public final Float getFloat(String key, String... aliases) {
-    return get(key, null, Float.class, aliases);
+    final String value = this.get(key);
+    return value == null ? null : new Float(value);
   }
 
   public final float getFloat(String key, float defaultValue) {
-    return get(key, defaultValue, Float.class);
+    final String value = this.get(key);
+    return value == null ? defaultValue : new Float(value);
   }
 
   public final Double getDouble(String key) {
-    return get(key, null, Double.class);
+    final String value = this.get(key);
+    return value == null ? null : new Double(value);
   }
 
   public final double getDouble(String key, double defaultValue) {
-    return get(key, defaultValue, Double.class);
+    final String value = this.get(key);
+    return value == null ? defaultValue : new Double(value);
   }
 
-  private <T> T get(String key, T defaultValue, Class<T> type, String... aliases) {
+  private String get(String key, String... aliases) {
     for (ConfigProvider.Source source : sources) {
-      T value;
-      try {
-        value = ConfigConverter.valueOf(source.get(key, aliases), type);
-      } catch (NumberFormatException ex) {
-        assert ex != null;
-        continue;
-      }
+      String value = source.get(key, aliases);
       if (value != null) {
         return value;
       }
     }
-    return defaultValue;
+    return null;
   }
 
   public final List<String> getList(String key) {

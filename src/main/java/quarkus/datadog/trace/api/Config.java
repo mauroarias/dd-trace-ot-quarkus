@@ -384,13 +384,6 @@ public class Config {
 
   private final ConfigProvider configProvider;
 
-  // Read order: System Properties -> Env Variables, [-> properties file], [-> default value]
-  private Config() {
-    this(
-        INSTANCE != null ? INSTANCE.runtimeId : UUID.randomUUID().toString(),
-        ConfigProvider.createDefault());
-  }
-
   private Config(final String runtimeId, final ConfigProvider configProvider) {
     this.configProvider = configProvider;
     configFile = findConfigurationFile();
@@ -1060,31 +1053,13 @@ public class Config {
   }
 
   // This has to be placed after all other static fields to give them a chance to initialize
-  private static final Config INSTANCE = new Config();
+  private static Config INSTANCE;
 
   public static Config get() {
+    if (INSTANCE == null) {
+      INSTANCE = new Config(UUID.randomUUID().toString(), ConfigProvider.createDefault());
+    }
     return INSTANCE;
   }
 
-  /**
-   * This method is deprecated since the method of configuration will be changed in the future. The
-   * properties instance should instead be passed directly into the DDTracer builder:
-   *
-   * <pre>
-   *   DDTracer.builder().withProperties(new Properties()).build()
-   * </pre>
-   *
-   * <p>Config keys for use in Properties instance construction can be found in {@link
-   * GeneralConfig} and {@link TracerConfig}.
-   *
-   * @deprecated
-   */
-  @Deprecated
-  public static Config get(final Properties properties) {
-    if (properties == null || properties.isEmpty()) {
-      return INSTANCE;
-    } else {
-      return new Config(INSTANCE.runtimeId, ConfigProvider.withPropertiesOverride(properties));
-    }
-  }
 }

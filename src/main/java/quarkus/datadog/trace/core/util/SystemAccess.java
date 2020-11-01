@@ -38,7 +38,7 @@ public final class SystemAccess {
        */
       systemAccessProvider =
           (SystemAccessProvider)
-              Class.forName("datadog.trace.core.util.JmxSystemAccessProvider")
+              Class.forName("quarkus.datadog.trace.core.util.JmxSystemAccessProvider")
                   .getField("INSTANCE")
                   .get(null);
     } catch (final ClassNotFoundException | NoSuchFieldException | IllegalAccessException e) {

@@ -62,10 +62,6 @@ public interface Sampler {
       return sampler;
     }
 
-    public static Sampler forConfig(final Properties config) {
-      return forConfig(Config.get(config));
-    }
-
     private Builder() {}
   }
 }
